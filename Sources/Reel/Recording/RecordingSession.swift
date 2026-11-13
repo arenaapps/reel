@@ -61,6 +61,7 @@ struct RecordingOptions {
     var mic: AVCaptureDevice?
     var systemAudio: Bool
     var cameraShape: CameraShape = .circle
+    var cameraOrientation: CameraOrientation = .auto
 }
 
 /// One recording from start to finished project folder.
@@ -85,7 +86,7 @@ final class RecordingSession {
         if options.camera != nil || options.mic != nil {
             let d = try DeviceRecorder(camera: options.camera, mic: options.mic,
                                        cameraURL: folder.appendingPathComponent("camera.mov"),
-                                       micURL: folder.appendingPathComponent("mic.m4a"), pause: pause)
+                                       micURL: folder.appendingPathComponent("mic.m4a"), orientation: options.cameraOrientation, pause: pause)
             d.warmUp()
             devices = d
         }

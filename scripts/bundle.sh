@@ -11,6 +11,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Reel"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/Reel.icns "$APP/Contents/Resources/Reel.icns"
 # Put REEL_SIGN_IDENTITY=<certificate hash or name> in scripts/sign.local (gitignored)
 # or the environment. Without one the app is signed ad hoc, and macOS asks for
 # Screen Recording permission again after each rebuild.

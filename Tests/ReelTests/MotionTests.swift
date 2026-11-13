@@ -64,7 +64,7 @@ final class MotionTests: XCTestCase {
         let decoded = try JSONDecoder().decode(EditSettings.self, from: JSONSerialization.data(withJSONObject: old))
         XCTAssertEqual(decoded.padding, 0.2)
         XCTAssertTrue(decoded.hideIdleCursor)
-        XCTAssertEqual(decoded.motionBlur, 0.5)
+        XCTAssertEqual(decoded.motionBlur, 0)
     }
 
     func testPauseClockRemovesPausedTime() {
@@ -80,5 +80,39 @@ final class MotionTests: XCTestCase {
         c.pause(at: 30)
         XCTAssertTrue(c.isPaused)
         XCTAssertEqual(c.toRecording(40), 26)
+    }
+
+    func testTimelineSkipsCutsAndTrim() {
+        var s = EditSettings()
+        s.trimStart = 1
+        s.trimEnd = 10
+        s.splits = [3, 5]
+        s.cuts = [CutRange(start: 3, end: 5)]
+        let m = EditTimeline(s, duration: 12)
+        XCTAssertEqual(m.kept, [.init(start: 1, end: 3), .init(start: 5, end: 10)])
+        XCTAssertEqual(m.length, 7, accuracy: 1e-9)
+        XCTAssertEqual(m.source(at: 0), 1, accuracy: 1e-9)
+        XCTAssertEqual(m.source(at: 2.5), 5.5, accuracy: 1e-9)
+        XCTAssertEqual(m.output(at: 4), 2, accuracy: 1e-9)      // inside the cut: where the video resumes
+        XCTAssertEqual(m.output(at: 6), 3, accuracy: 1e-9)
+        XCTAssertEqual(m.playable(4), 3, accuracy: 1e-9)
+
+        let pieces = s.pieces(duration: 12)
+        XCTAssertEqual(pieces.map(\.isCut), [false, true, false])
+        XCTAssertEqual(pieces.map(\.start), [1, 3, 5])
+    }
+
+    func testEverythingCutKeepsASliver() {
+        var s = EditSettings()
+        s.cuts = [CutRange(start: 0, end: 6)]
+        let m = EditTimeline(s, duration: 6)
+        XCTAssertGreaterThan(m.length, 0)
+    }
+
+    func testOldProjectsHaveNoCuts() throws {
+        let json = #"{"trimStart": 0.5}"#.data(using: .utf8)!
+        let s = try JSONDecoder().decode(EditSettings.self, from: json)
+        XCTAssertTrue(s.splits.isEmpty)
+        XCTAssertTrue(s.cuts.isEmpty)
     }
 }

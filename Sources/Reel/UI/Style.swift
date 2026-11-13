@@ -98,12 +98,17 @@ struct PillButton: View {
     let title: String
     var symbol: String?
     var prominent = false
+    var shortcut: String?
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
                 if let symbol { Image(systemName: symbol).font(.system(size: 12, weight: .medium)) }
                 Text(title).font(.system(size: 12, weight: prominent ? .semibold : .medium))
+                if let shortcut {
+                    Text(shortcut).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.45))
+                        .padding(.leading, 4)
+                }
             }
             .foregroundStyle(prominent ? Palette.ink : .white.opacity(0.9))
             .padding(.horizontal, 12).padding(.vertical, 7)

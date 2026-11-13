@@ -53,6 +53,7 @@ final class AppModel: ObservableObject {
     @Published var systemAudio: Bool { didSet { defaults.set(systemAudio, forKey: "systemAudio") } }
     @Published var countdownEnabled: Bool { didSet { defaults.set(countdownEnabled, forKey: "countdown") } }
     @Published var cameraShape: CameraShape { didSet { defaults.set(cameraShape.rawValue, forKey: "cameraShape") } }
+    @Published var cameraOrientation: CameraOrientation { didSet { defaults.set(cameraOrientation.rawValue, forKey: "cameraOrientation") } }
 
     private let defaults = UserDefaults.standard
     private var session: RecordingSession?
@@ -72,6 +73,7 @@ final class AppModel: ObservableObject {
         systemAudio = d.object(forKey: "systemAudio") as? Bool ?? true
         countdownEnabled = d.object(forKey: "countdown") as? Bool ?? true
         cameraShape = CameraShape(rawValue: d.string(forKey: "cameraShape") ?? "") ?? .circle
+        cameraOrientation = CameraOrientation(rawValue: d.string(forKey: "cameraOrientation") ?? "") ?? .auto
 
         hotKey = HotKey(keyCode: UInt32(kVK_ANSI_2), modifiers: UInt32(cmdKey | shiftKey)) { [weak self] in
             Task { @MainActor in self?.toggleRecording() }
@@ -178,7 +180,7 @@ final class AppModel: ObservableObject {
         var isDevice = false
         if case .device = source { isDevice = true }
         let options = RecordingOptions(source: source, camera: selectedCamera, mic: selectedMic,
-                                       systemAudio: systemAudio && !isDevice, cameraShape: cameraShape)
+                                       systemAudio: systemAudio && !isDevice, cameraShape: cameraShape, cameraOrientation: cameraOrientation)
         do {
             let s = try RecordingSession(options: options)
             try s.prepare()

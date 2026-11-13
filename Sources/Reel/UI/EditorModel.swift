@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import AVFoundation
 import Combine
 
@@ -9,7 +10,9 @@ final class EditorModel: ObservableObject {
     @Published var settings: EditSettings
     @Published var currentTime: Double = 0      // source time (seconds into the recording)
     @Published var isPlaying = false
-    @Published var selectedZoom: UUID?
+    @Published var selectedZoom: UUID? { didSet { if selectedZoom != nil { selectedPiece = nil } } }
+    /// Start time of the selected clip piece.
+    @Published var selectedPiece: Double? { didSet { if selectedPiece != nil { selectedZoom = nil } } }
     @Published var exportProgress: Double?
     @Published var exportError: String?
     @Published var lastExport: URL?
@@ -23,7 +26,7 @@ final class EditorModel: ObservableObject {
     private var undoStack: [EditSettings] = [] { didSet { canUndo = !undoStack.isEmpty } }
     private var redoStack: [EditSettings] = [] { didSet { canRedo = !redoStack.isEmpty } }
 
-    private var builtTrim: (Double, Double)?
+    private var builtTimeline: EditTimeline?
     private var rebuildTask: Task<Void, Never>?
     private var timeObserver: Any?
     private var bag: Set<AnyCancellable> = []
@@ -31,6 +34,15 @@ final class EditorModel: ObservableObject {
 
     var duration: Double { project.document.recording.duration }
     var trimEnd: Double { min(settings.trimEnd ?? duration, duration) }
+    var timeline: EditTimeline { EditTimeline(settings, duration: duration) }
+    var pieces: [ClipPiece] { settings.pieces(duration: duration) }
+    /// The timeline's own axis: the recording with every cut taken out (trimmed ends stay visible).
+    var displayMap: EditTimeline {
+        var s = settings
+        s.trimStart = 0
+        s.trimEnd = nil
+        return EditTimeline(s, duration: duration)
+    }
 
     init(project: ReelProject) {
         self.project = project
@@ -40,7 +52,7 @@ final class EditorModel: ObservableObject {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { [weak self] t in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.currentTime = t.seconds + self.settings.trimStart
+                self.currentTime = (self.builtTimeline ?? self.timeline).source(at: t.seconds)
                 self.isPlaying = self.player.rate != 0
             }
         }
@@ -91,8 +103,8 @@ final class EditorModel: ObservableObject {
                 if sourceSize != src { sourceSize = src }
                 let built = try await CompositionBuilder.build(project: project, settings: s, renderSize: previewSize(source: src), fps: 30)
                 if Task.isCancelled { return }
-                let trim = (s.trimStart, min(s.trimEnd ?? duration, duration))
-                if let item = player.currentItem, let b = builtTrim, b == trim {
+                let mapped = EditTimeline(s, duration: duration)
+                if let item = player.currentItem, let b = builtTimeline, b == mapped {
                     // Same tracks, only the look changed: swap the drawing in place.
                     item.videoComposition = built.videoComposition
                     item.audioMix = built.audioMix
@@ -101,7 +113,7 @@ final class EditorModel: ObservableObject {
                     item.videoComposition = built.videoComposition
                     item.audioMix = built.audioMix
                     player.replaceCurrentItem(with: item)
-                    builtTrim = trim
+                    builtTimeline = mapped
                     seek(to: source)
                 }
                 Log.render.info("preview rebuilt \(Int(built.videoComposition.renderSize.width))x\(Int(built.videoComposition.renderSize.height))")
@@ -130,6 +142,7 @@ final class EditorModel: ObservableObject {
         committed = s
         settings = s
         if let id = selectedZoom, !s.zooms.contains(where: { $0.id == id }) { selectedZoom = nil }
+        if let sp = selectedPiece, !pieces.contains(where: { abs($0.start - sp) < 1e-6 }) { selectedPiece = nil }
     }
 
     // MARK: name and shape
@@ -158,18 +171,81 @@ final class EditorModel: ObservableObject {
         seek(to: currentTime + Double(frames) / 30)
     }
 
+    /// Moves the playhead to a moment of the recording. Inside a cut it lands where the video resumes.
     func seek(to source: Double) {
-        let t = min(max(source, settings.trimStart), trimEnd) - settings.trimStart
-        currentTime = t + settings.trimStart
-        player.seek(to: CMTime(seconds: t, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        let map = timeline
+        let out = map.output(at: min(max(source, settings.trimStart), trimEnd))
+        currentTime = map.source(at: out)
+        player.seek(to: CMTime(seconds: out, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     func togglePlay() {
         if player.rate != 0 { player.pause() } else {
-            if currentTime >= trimEnd - 0.05 { seek(to: settings.trimStart) }
+            let map = timeline
+            if map.output(at: currentTime) >= map.length - 0.05 { seek(to: map.source(at: 0)) }
             player.play()
         }
         isPlaying = player.rate != 0
+    }
+
+    // MARK: split and cut
+
+    /// Splits at the playhead: the selected zoom if the playhead is inside it, otherwise the clip.
+    func split() {
+        let t = currentTime
+        if let id = selectedZoom, let i = settings.zooms.firstIndex(where: { $0.id == id }) {
+            let z = settings.zooms[i]
+            guard t > z.start + 0.2, t < z.end - 0.2 else { NSSound.beep(); return }
+            var first = z, second = z
+            first.end = t
+            first.isAuto = false
+            second.id = UUID()
+            second.start = t
+            second.isAuto = false
+            settings.zooms[i] = first
+            settings.zooms.insert(second, at: i + 1)
+            selectedZoom = second.id
+            return
+        }
+        guard t > settings.trimStart + 0.1, t < trimEnd - 0.1,
+              !settings.splits.contains(where: { abs($0 - t) < 0.1 }) else { return }
+        settings.splits.append(t)
+        // A split inside a cut leaves both halves cut.
+        selectedPiece = nil
+    }
+
+    func selectPiece(at t: Double) {
+        selectedPiece = pieces.first { $0.start <= t && t <= $0.end }?.start
+    }
+
+    /// Delete on a piece cuts it out of the video; on a piece already cut, brings it back.
+    func toggleSelectedPieceCut() {
+        guard let start = selectedPiece, let p = pieces.first(where: { abs($0.start - start) < 1e-6 }) else { return }
+        if p.isCut {
+            settings.cuts.removeAll { $0.start <= p.mid && p.mid <= $0.end }
+        } else {
+            // Keep at least one piece in the video.
+            guard pieces.filter({ !$0.isCut }).count > 1 else { NSSound.beep(); return }
+            settings.cuts.append(CutRange(start: p.start, end: p.end))
+            selectedPiece = nil
+        }
+        seek(to: currentTime)
+    }
+
+    /// Drags the split at `old` to `new`, keeping any cut that ends or starts there attached.
+    func moveSplit(from old: Double, to new: Double) -> Double {
+        let edges = [settings.trimStart] + settings.splits.filter { abs($0 - old) > 1e-6 }.sorted() + [trimEnd]
+        let lo = edges.last { $0 < old } ?? settings.trimStart
+        let hi = edges.first { $0 > old } ?? trimEnd
+        let v = min(max(new, lo + 0.2), hi - 0.2)
+        guard let i = settings.splits.firstIndex(where: { abs($0 - old) < 1e-6 }) else { return old }
+        settings.splits[i] = v
+        for j in settings.cuts.indices {
+            if abs(settings.cuts[j].start - old) < 1e-6 { settings.cuts[j].start = v }
+            if abs(settings.cuts[j].end - old) < 1e-6 { settings.cuts[j].end = v }
+        }
+        if let sp = selectedPiece, abs(sp - old) < 1e-6 { selectedPiece = v }
+        return v
     }
 
     // MARK: zooms

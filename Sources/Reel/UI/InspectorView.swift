@@ -296,7 +296,7 @@ struct ExportPanel: View {
     }
 
     private var summary: String {
-        let duration = String(format: "%.1f s", model.trimEnd - model.settings.trimStart)
+        let duration = String(format: "%.1f s", model.timeline.length)
         if options.format == .mp4 {
             let s = model.outputSize(shortSide: CGFloat(options.quality.rawValue))
             return "\(Int(s.width)) × \(Int(s.height)) · \(duration)"

@@ -49,7 +49,7 @@ final class ReelCompositor: NSObject, AVVideoCompositing {
             let state = instruction.state
             let screen = request.sourceFrame(byTrackID: instruction.screenTrackID).map { CIImage(cvPixelBuffer: $0) }
             let camera = instruction.cameraTrackID.flatMap { request.sourceFrame(byTrackID: $0) }.map { CIImage(cvPixelBuffer: $0) }
-            let t = request.compositionTime.seconds + state.settings.trimStart
+            let t = state.mappedTimeline.source(at: request.compositionTime.seconds)
             let image = state.render(screen: screen, camera: camera, at: t)
             Self.context.render(image, to: out, bounds: CGRect(origin: .zero, size: state.renderSize),
                                 colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
@@ -87,19 +87,24 @@ enum CompositionBuilder {
 
         let state = RenderState(settings: settings, recording: rec, events: project.events, folder: project.folder,
                                 renderSize: renderSize, sourceSize: sourceSize)
-        let a = settings.trimStart
-        let b = state.trimEnd
-        let length = b - a
+        let kept = state.mappedTimeline.kept
+        let length = state.mappedTimeline.length
         let timescale: CMTimeScale = 600
         func cm(_ s: Double) -> CMTime { CMTime(seconds: s, preferredTimescale: timescale) }
 
-        /// Inserts a track from a file that starts `offset` seconds into the recording.
+        /// Inserts the kept stretches of a file that starts `offset` seconds into the recording,
+        /// back to back, so cuts and trimmed ends drop out of the video.
         func insert(_ track: AVAssetTrack, fileDuration: Double, offset: Double, into dst: AVMutableCompositionTrack) throws {
-            let fileStart = max(0, a - offset)
-            let at = max(0, offset - a)
-            let len = min(fileDuration - fileStart, length - at)
-            guard len > 0.01 else { return }
-            try dst.insertTimeRange(CMTimeRange(start: cm(fileStart), duration: cm(len)), of: track, at: cm(at))
+            var at = 0.0
+            for r in kept {
+                let fs = max(0, r.start - offset)
+                let fe = min(fileDuration, r.end - offset)
+                let lead = max(0, offset - r.start)
+                if fe - fs > 0.01 {
+                    try dst.insertTimeRange(CMTimeRange(start: cm(fs), duration: cm(fe - fs)), of: track, at: cm(at + lead))
+                }
+                at += r.end - r.start
+            }
         }
 
         let screenDuration = try await screenAsset.load(.duration).seconds

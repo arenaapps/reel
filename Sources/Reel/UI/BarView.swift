@@ -160,6 +160,11 @@ struct BarView: View {
         m.header("Shape")
         m.item("Circle", checked: model.cameraShape == .circle) { model.cameraShape = .circle }
         m.item("Rounded square", checked: model.cameraShape == .rounded) { model.cameraShape = .rounded }
+        m.addItem(.separator())
+        m.header("Orientation")
+        m.item("Same as camera", checked: model.cameraOrientation == .auto) { model.cameraOrientation = .auto }
+        m.item("Landscape", checked: model.cameraOrientation == .landscape) { model.cameraOrientation = .landscape }
+        m.item("Portrait", checked: model.cameraOrientation == .portrait) { model.cameraOrientation = .portrait }
         m.show(at: anchor)
     }
 

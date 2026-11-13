@@ -128,7 +128,7 @@ struct EditorView: View {
 
     // MARK: timeline
 
-    @State private var timelineScale: Double = 1
+    @StateObject private var viewport = TimelineViewport()
 
     private var timeline: some View {
         VStack(spacing: 10) {
@@ -143,22 +143,33 @@ struct EditorView: View {
                 .buttonStyle(.plain)
                 .help("Play or pause (Space)")
                 HStack(spacing: 6) {
-                    Text(Self.clock(model.currentTime - model.settings.trimStart)).font(.system(size: 13, weight: .semibold))
-                    Text("/ " + Self.clock(model.trimEnd - model.settings.trimStart)).font(.system(size: 13)).foregroundStyle(.white.opacity(0.45))
+                    Text(Self.clock(model.timeline.output(at: model.currentTime))).font(.system(size: 13, weight: .semibold))
+                    Text("/ " + Self.clock(model.timeline.length)).font(.system(size: 13)).foregroundStyle(.white.opacity(0.45))
                 }
                 .monospacedDigit()
                 Spacer()
+                PillButton(title: "Split", shortcut: "S", action: model.split)
+                    .keyboardShortcut(editingName ? nil : KeyboardShortcut("b", modifiers: .command))
+                    .help("Split at the playhead (S or ⌘B). With a zoom selected, splits that zoom.")
                 PillButton(title: "Add zoom", symbol: "plus.magnifyingglass", action: model.addZoom)
-                HStack(spacing: 6) {
-                    Button { timelineScale = max(1, timelineScale / 1.5) } label: { Image(systemName: "minus") }
+                Spacer()
+                HStack(spacing: 8) {
+                    Button { viewport.zoom(by: 1 / 1.5, aroundTime: model.displayMap.output(at: model.currentTime), duration: model.displayMap.length) } label: { Image(systemName: "minus") }
                         .buttonStyle(.plain).foregroundStyle(.white.opacity(0.6))
-                    ReelSliderBare(value: $timelineScale, range: 1...8).frame(width: 70)
-                    Button { timelineScale = min(8, timelineScale * 1.5) } label: { Image(systemName: "plus") }
+                        .keyboardShortcut("-", modifiers: .command)
+                    ReelSliderBare(value: Binding(get: { log(viewport.scale) / log(TimelineViewport.maxScale) },
+                                                  set: { viewport.setScale(pow(TimelineViewport.maxScale, $0), aroundTime: model.displayMap.output(at: model.currentTime), duration: model.displayMap.length) }),
+                                   range: 0...1).frame(width: 110)
+                    Button { viewport.zoom(by: 1.5, aroundTime: model.displayMap.output(at: model.currentTime), duration: model.displayMap.length) } label: { Image(systemName: "plus") }
                         .buttonStyle(.plain).foregroundStyle(.white.opacity(0.6))
+                        .keyboardShortcut("=", modifiers: .command)
+                    PillButton(title: "Fit", action: viewport.fit)
+                        .keyboardShortcut("0", modifiers: .command)
+                        .help("Show the whole recording (⌘0)")
                 }
-                .help("Timeline scale")
+                .help("Zoom the timeline: pinch, ⌘ + scroll, ⌘= and ⌘−")
             }
-            TimelineView(model: model, scale: timelineScale)
+            TimelineView(model: model, viewport: viewport)
                 .frame(height: 150)
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -228,12 +239,15 @@ struct EditorKeys: NSViewRepresentable {
             switch e.keyCode {
             case 49 where mods.isEmpty:                       // space
                 m.togglePlay(); return true
+            case 1 where mods.isEmpty:                        // S
+                m.split(); return true
             case 51, 117:                                     // delete, forward delete
-                guard m.selectedZoom != nil else { return false }
-                m.deleteSelectedZoom(); return true
+                if m.selectedZoom != nil { m.deleteSelectedZoom(); return true }
+                if m.selectedPiece != nil { m.toggleSelectedPieceCut(); return true }
+                return false
             case 53:                                          // esc
-                guard m.selectedZoom != nil else { return false }
-                m.selectedZoom = nil; return true
+                guard m.selectedZoom != nil || m.selectedPiece != nil else { return false }
+                m.selectedZoom = nil; m.selectedPiece = nil; return true
             case 123: m.step(frames: mods.contains(.shift) ? -30 : -1); return true   // left
             case 124: m.step(frames: mods.contains(.shift) ? 30 : 1); return true     // right
             default: return false
@@ -274,11 +288,48 @@ final class PlayerLayerView: NSView {
     }
 }
 
-/// Ruler, the clip with trim handles, click marks, zoom blocks and the playhead.
+/// Which part of the recording the timeline shows. `scale` 1 fits the whole recording;
+/// `offset` is how far the content is scrolled, in points.
+@MainActor
+final class TimelineViewport: ObservableObject {
+    static let maxScale = 24.0
+    @Published var scale: Double = 1
+    @Published var offset: CGFloat = 0
+    var width: CGFloat = 1   // visible width, set by the view
+
+    var contentWidth: CGFloat { width * CGFloat(scale) }
+    /// Points per second of recording.
+    func pxPerSec(_ duration: Double) -> CGFloat { (contentWidth - 32) / CGFloat(max(duration, 0.1)) }
+    func x(_ t: Double, _ duration: Double) -> CGFloat { 16 + CGFloat(t) * pxPerSec(duration) - offset }
+    func time(_ x: CGFloat, _ duration: Double) -> Double {
+        min(max(Double((x + offset - 16) / pxPerSec(duration)), 0), duration)
+    }
+
+    func clamp() { offset = min(max(0, offset), max(0, contentWidth - width)) }
+    func pan(_ dx: CGFloat) { offset += dx; clamp() }
+    func fit() { scale = 1; offset = 0 }
+
+    /// Changes the scale keeping the point at `anchorX` (visible coordinates) still.
+    func setScale(_ new: Double, anchorX: CGFloat, duration: Double) {
+        let t = time(anchorX, duration)
+        scale = min(max(new, 1), Self.maxScale)
+        offset = 16 + CGFloat(t) * pxPerSec(duration) - anchorX
+        clamp()
+    }
+    func setScale(_ new: Double, aroundTime t: Double, duration: Double) {
+        let ax = x(t, duration)
+        setScale(new, anchorX: (0...width).contains(ax) ? ax : width / 2, duration: duration)
+    }
+    func zoom(by f: Double, aroundTime t: Double, duration: Double) { setScale(scale * f, aroundTime: t, duration: duration) }
+    func zoom(by f: Double, anchorX: CGFloat, duration: Double) { setScale(scale * f, anchorX: anchorX, duration: duration) }
+}
+
+/// Ruler, the clip pieces with trim and split handles, click marks, zoom blocks and the playhead.
 struct TimelineView: View {
     @ObservedObject var model: EditorModel
-    var scale: Double = 1
+    @ObservedObject var viewport: TimelineViewport
     @State private var drag: DragState?
+    @State private var splitDrag: (old: Double, current: Double)?
 
     enum DragKind { case move, start, end }
     struct DragState { let id: UUID; let kind: DragKind; let original: ZoomSegment }
@@ -287,64 +338,125 @@ struct TimelineView: View {
 
     var body: some View {
         GeometryReader { outer in
-            ScrollView(.horizontal, showsIndicators: scale > 1) {
-                let total = outer.size.width * CGFloat(scale)
-                let w = total - 32
-                let dur = max(model.duration, 0.1)
-                let x: (Double) -> CGFloat = { 16 + CGFloat($0 / dur) * w }
-                let t: (CGFloat) -> Double = { min(max(Double(($0 - 16) / w) * dur, 0), dur) }
-                ZStack(alignment: .topLeading) {
-                    // Empty space: click to move the playhead and clear the zoom selection.
-                    Color.clear.contentShape(Rectangle())
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { v in
-                            model.selectedZoom = nil
-                            model.seek(to: t(v.location.x))
-                        })
-                    ruler(x: x, dur: dur, width: w)
-                    // Clip
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Palette.clip.opacity(0.16))
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.clip.opacity(0.9), lineWidth: 1.5))
-                        .overlay(alignment: .leading) {
-                            Text("Recording · \(String(format: "%.1f", model.trimEnd - model.settings.trimStart)) s")
-                                .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.85))
-                                .padding(.leading, 18).lineLimit(1)
-                        }
-                        .frame(width: max(x(model.trimEnd) - x(model.settings.trimStart), 16), height: clipH)
-                        .offset(x: x(model.settings.trimStart), y: clipY)
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { v in
-                            model.selectedZoom = nil
-                            model.seek(to: t(v.location.x + x(model.settings.trimStart)))
-                        })
-                    // Clicks
-                    ForEach(Array(model.project.events.clicks.enumerated()), id: \.offset) { _, c in
-                        RoundedRectangle(cornerRadius: 1).fill(.white.opacity(0.7))
-                            .frame(width: 2, height: 10)
-                            .offset(x: x(c.t), y: clipY + clipH - 12)
-                            .allowsHitTesting(false)
-                    }
-                    // Trim handles
-                    trimHandle(at: x(model.settings.trimStart)) { v in
-                        model.settings.trimStart = min(t(v.location.x), model.trimEnd - 0.5)
-                    }
-                    trimHandle(at: x(model.trimEnd) - 8) { v in
-                        let e = max(t(v.location.x), model.settings.trimStart + 0.5)
-                        model.settings.trimEnd = e >= dur - 0.01 ? nil : e
-                    }
-                    // Zooms
-                    ForEach(model.settings.zooms) { z in
-                        zoomBlock(z, x: x, width: max(x(z.end) - x(z.start), 10))
-                    }
-                    // Playhead
-                    let px = x(model.currentTime)
-                    Rectangle().fill(.white).frame(width: 2, height: 130).offset(x: px - 1, y: 20).allowsHitTesting(false)
-                    RoundedRectangle(cornerRadius: 3).fill(.white).frame(width: 12, height: 12).offset(x: px - 6, y: 14)
+            // Cut pieces are gone from the axis entirely; x and t convert through it.
+            let map = model.displayMap
+            let dur = max(map.length, 0.1)
+            let x: (Double) -> CGFloat = { viewport.x(map.output(at: $0), dur) }
+            let t: (CGFloat) -> Double = { map.source(at: viewport.time($0, dur)) }
+            let pieces = model.pieces
+            ZStack(alignment: .topLeading) {
+                // Empty space: click to move the playhead and clear the selection.
+                Color.clear.contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { v in
+                        model.selectedZoom = nil
+                        model.selectedPiece = nil
+                        model.seek(to: t(v.location.x))
+                    })
+                ruler(x: { viewport.x($0, dur) }, dur: dur, width: viewport.contentWidth - 32)
+                // Clip pieces
+                ForEach(Array(pieces.enumerated()), id: \.offset) { _, p in
+                    if !p.isCut { piece(p, x: x, t: t) }
+                }
+                // Clicks
+                ForEach(Array(model.project.events.clicks.filter { abs(map.playable($0.t) - $0.t) < 1e-6 }.enumerated()), id: \.offset) { _, c in
+                    RoundedRectangle(cornerRadius: 1).fill(.white.opacity(0.7))
+                        .frame(width: 2, height: 10)
+                        .offset(x: x(c.t), y: clipY + clipH - 12)
                         .allowsHitTesting(false)
                 }
-                .frame(width: total, height: outer.size.height, alignment: .topLeading)
-                .coordinateSpace(name: "timeline")
+                // Trim handles at the outer edges
+                trimHandle(at: x(model.settings.trimStart)) { v in
+                    model.settings.trimStart = min(t(v.location.x), (model.pieces.first?.end ?? model.trimEnd) - 0.2)
+                }
+                trimHandle(at: x(model.trimEnd) - 8) { v in
+                    let e = max(t(v.location.x), (model.pieces.last?.start ?? model.settings.trimStart) + 0.2)
+                    model.settings.trimEnd = e >= dur - 0.01 ? nil : e
+                }
+                // Split handles between neighbouring kept pieces; a plain line where a cut was taken out.
+                let joins = Array(zip(pieces, pieces.dropFirst()))
+                ForEach(joins.filter { !$0.0.isCut && !$0.1.isCut }.map(\.1.start), id: \.self) { s in
+                    splitHandle(at: s, x: x, t: t)
+                }
+                ForEach(joins.filter { $0.0.isCut && !$0.1.isCut && pieces.first(where: { !$0.isCut })?.start != $0.1.start }.map(\.1.start), id: \.self) { s in
+                    RoundedRectangle(cornerRadius: 1).fill(.white.opacity(0.6)).frame(width: 2, height: clipH + 8)
+                        .offset(x: x(s) - 1, y: clipY - 4).allowsHitTesting(false)
+                }
+                // Zooms
+                ForEach(model.settings.zooms.filter { map.output(at: $0.end) - map.output(at: $0.start) > 0.05 }) { z in
+                    zoomBlock(z, x: x, t: t, width: max(x(z.end) - x(z.start), 10))
+                }
+                // Playhead
+                let px = x(model.currentTime)
+                Rectangle().fill(.white).frame(width: 2, height: 130).offset(x: px - 1, y: 20).allowsHitTesting(false)
+                RoundedRectangle(cornerRadius: 3).fill(.white).frame(width: 12, height: 12).offset(x: px - 6, y: 14)
+                    .allowsHitTesting(false)
+                // Where the view sits along the recording, when zoomed in
+                if viewport.scale > 1.01 {
+                    let w = outer.size.width - 32
+                    let frac = outer.size.width / viewport.contentWidth
+                    Capsule().fill(.white.opacity(0.08)).frame(width: w, height: 4).offset(x: 16, y: outer.size.height - 10)
+                        .allowsHitTesting(false)
+                    Capsule().fill(.white.opacity(0.35))
+                        .frame(width: max(24, w * frac), height: 4)
+                        .offset(x: 16 + w * viewport.offset / viewport.contentWidth, y: outer.size.height - 10)
+                        .allowsHitTesting(false)
+                }
+                ScrollCatcher(viewport: viewport, duration: dur).allowsHitTesting(false)
             }
+            .frame(width: outer.size.width, height: outer.size.height, alignment: .topLeading)
+            .clipped()
+            .coordinateSpace(name: "timeline")
+            .onAppear { viewport.width = outer.size.width; viewport.clamp() }
+            .onChange(of: outer.size.width) { _, w in viewport.width = w; viewport.clamp() }
         }
+    }
+
+    private func piece(_ p: ClipPiece, x: @escaping (Double) -> CGFloat, t: @escaping (CGFloat) -> Double) -> some View {
+        let selected = model.selectedPiece.map { abs($0 - p.start) < 1e-6 } ?? false
+        let w = max(x(p.end) - x(p.start), 4)
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return ZStack(alignment: .topLeading) {
+            shape.fill(Palette.clip.opacity(p.isCut ? 0.05 : 0.16))
+            if p.isCut {
+                shape.strokeBorder(Palette.clip.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
+            } else {
+                shape.strokeBorder(Palette.clip.opacity(0.9), lineWidth: 1.5)
+            }
+            if selected { shape.strokeBorder(.white, lineWidth: 2) }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(p.isCut ? "Cut" : String(format: "%.1f s", p.end - p.start))
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(p.isCut ? 0.45 : 0.85))
+                if p.isCut {
+                    Text("Skipped in the video").font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            .lineLimit(1)
+            .padding(.leading, 14).padding(.top, 8)
+            .opacity(w > 60 ? 1 : 0)
+        }
+        .frame(width: w, height: clipH)
+        .offset(x: x(p.start), y: clipY)
+        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("timeline")).onChanged { v in
+            model.selectedPiece = p.start
+            model.seek(to: t(v.location.x))
+        })
+        .help(p.isCut ? "Cut. Select it and press Delete to bring it back." : "Click to select. Delete cuts it out of the video.")
+    }
+
+    private func splitHandle(at s: Double, x: @escaping (Double) -> CGFloat, t: @escaping (CGFloat) -> Double) -> some View {
+        ZStack {
+            Rectangle().fill(Color.white.opacity(0.001)).frame(width: 12)
+            RoundedRectangle(cornerRadius: 1).fill(.white).frame(width: 2, height: clipH + 8)
+        }
+        .frame(width: 12, height: clipH + 8)
+        .offset(x: x(s) - 6, y: clipY - 4)
+        .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("timeline")).onChanged { v in
+            let old = splitDrag?.current ?? s
+            let now = model.moveSplit(from: old, to: t(v.location.x))
+            splitDrag = (s, now)
+        }.onEnded { _ in splitDrag = nil })
+        .help("Drag to move the split")
     }
 
     private func ruler(x: @escaping (Double) -> CGFloat, dur: Double, width: CGFloat) -> some View {
@@ -375,7 +487,7 @@ struct TimelineView: View {
             .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
     }
 
-    private func zoomBlock(_ z: ZoomSegment, x: @escaping (Double) -> CGFloat, width: CGFloat) -> some View {
+    private func zoomBlock(_ z: ZoomSegment, x: @escaping (Double) -> CGFloat, t: @escaping (CGFloat) -> Double, width: CGFloat) -> some View {
         let selected = model.selectedZoom == z.id
         return ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -398,11 +510,15 @@ struct TimelineView: View {
         }
         .frame(width: width, height: zoomH)
         .offset(x: x(z.start), y: zoomY)
-        .onTapGesture { model.selectedZoom = z.id }
+        .gesture(SpatialTapGesture(coordinateSpace: .named("timeline")).onEnded { v in
+            // Select it and put the playhead where it was clicked, ready for S to split it there.
+            model.selectedZoom = z.id
+            model.seek(to: t(v.location.x))
+        })
         .gesture(DragGesture(minimumDistance: 2).onChanged { v in
             apply(z, kind: .move, dx: v.translation.width, x: x)
         }.onEnded { _ in drag = nil })
-        .help("Click to select. Delete removes it. Drag to move, drag the edges to resize.")
+        .help("Click to select. S splits it at the playhead, Delete removes it. Drag to move, drag the edges to resize.")
     }
 
     private func edge(_ z: ZoomSegment, _ kind: DragKind, x: @escaping (Double) -> CGFloat) -> some View {
@@ -414,25 +530,75 @@ struct TimelineView: View {
     }
 
     private func apply(_ z: ZoomSegment, kind: DragKind, dx: CGFloat, x: @escaping (Double) -> CGFloat) {
-        let pxPerSec = x(1) - x(0)
+        // Work on the timeline's axis (cuts removed), then map back to recording time.
+        let map = model.displayMap
+        let dur = map.length
+        let pxPerSec = viewport.pxPerSec(dur)
         guard pxPerSec > 0 else { return }
         let dt = Double(dx / pxPerSec)
         if drag?.id != z.id || drag?.kind != kind { drag = DragState(id: z.id, kind: kind, original: z) }
         guard let d = drag, let i = model.settings.zooms.firstIndex(where: { $0.id == z.id }) else { return }
         var n = d.original
-        let dur = model.duration
+        let s0 = map.output(at: d.original.start), e0 = map.output(at: d.original.end)
+        var s1 = s0, e1 = e0
         switch kind {
         case .move:
-            let len = n.end - n.start
-            n.start = min(max(0, d.original.start + dt), dur - len)
-            n.end = n.start + len
+            let len = e0 - s0
+            s1 = min(max(0, s0 + dt), dur - len)
+            e1 = s1 + len
         case .start:
-            n.start = min(max(0, d.original.start + dt), n.end - 0.3)
+            s1 = min(max(0, s0 + dt), e0 - 0.3)
         case .end:
-            n.end = max(min(dur, d.original.end + dt), n.start + 0.3)
+            e1 = max(min(dur, e0 + dt), s0 + 0.3)
         }
+        n.start = map.source(at: s1)
+        n.end = map.source(at: e1)
         n.isAuto = false
         model.selectedZoom = z.id
         model.settings.zooms[i] = n
+    }
+}
+
+/// Turns trackpad pinches and ⌘ + scroll over the timeline into timeline zoom, and other
+/// scrolling into moving along it when zoomed in.
+struct ScrollCatcher: NSViewRepresentable {
+    let viewport: TimelineViewport
+    let duration: Double
+
+    func makeNSView(context: Context) -> CatcherView { CatcherView() }
+    func updateNSView(_ v: CatcherView, context: Context) { v.viewport = viewport; v.duration = duration }
+
+    final class CatcherView: NSView {
+        weak var viewport: TimelineViewport?
+        var duration: Double = 1
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .magnify]) { [weak self] e in
+                guard let self, let vp = self.viewport, e.window === self.window else { return e }
+                let p = self.convert(e.locationInWindow, from: nil)
+                guard self.bounds.contains(p) else { return e }
+                let anchor = p.x
+                return MainActor.assumeIsolated {
+                    if e.type == .magnify {
+                        vp.zoom(by: 1 + Double(e.magnification) * 1.5, anchorX: anchor, duration: self.duration)
+                        return nil
+                    }
+                    let dy = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY : e.scrollingDeltaY * 8
+                    let dx = e.hasPreciseScrollingDeltas ? e.scrollingDeltaX : e.scrollingDeltaX * 8
+                    if e.modifierFlags.contains(.command) {
+                        vp.zoom(by: exp(Double(dy) * 0.01), anchorX: anchor, duration: self.duration)
+                        return nil
+                    }
+                    guard vp.scale > 1.01 else { return e }
+                    vp.pan(-(abs(dx) > abs(dy) ? dx : dy))
+                    return nil
+                }
+            }
+        }
+        // Not flipped-aware in SwiftUI's sense, but only x is used.
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
     }
 }

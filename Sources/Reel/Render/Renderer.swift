@@ -18,6 +18,7 @@ final class RenderState {
     let fallbackCursor: (image: CIImage, info: CursorImage)?
     let backgroundImage: CIImage?
     let layout: Layout
+    let mappedTimeline: EditTimeline
 
     struct Layout {
         let screenRect: CGRect      // top-left origin, output pixels
@@ -33,6 +34,7 @@ final class RenderState {
         self.events = events
         self.renderSize = renderSize
         self.sourceSize = sourceSize
+        mappedTimeline = EditTimeline(settings, duration: recording.duration)
         let duration = recording.duration
         cursorTrack = Motion.smoothedCursor(events.samples, duration: duration, smoothing: settings.cursorSmoothing)
         cameraTrack = ZoomPlanner.cameraTrack(zooms: settings.zooms, cursor: Motion.smoothedCursor(events.samples, duration: duration, smoothing: 0.95),
@@ -78,7 +80,24 @@ final class RenderState {
     }
 
     var trimEnd: Double { min(settings.trimEnd ?? recording.duration, recording.duration) }
-    var outputDuration: Double { max(0.1, trimEnd - settings.trimStart) }
+    var outputDuration: Double { max(0.1, mappedTimeline.length) }
+
+    /// An anti-aliased ring: a disk with a smaller disk taken out of it.
+    static func ring(center: CGPoint, radius r: CGFloat, width w: CGFloat, alpha: CGFloat) -> CIImage {
+        func disk(_ rr: CGFloat, _ a: CGFloat) -> CIImage {
+            let g = CIFilter.radialGradient()
+            g.center = center
+            g.radius0 = Float(max(0, rr - 0.75))
+            g.radius1 = Float(rr + 0.75)
+            g.color0 = CIColor(red: 1, green: 1, blue: 1, alpha: a)
+            g.color1 = CIColor(red: 1, green: 1, blue: 1, alpha: 0)
+            return g.outputImage!
+        }
+        let box = CGRect(x: center.x - r - 2, y: center.y - r - 2, width: 2 * r + 4, height: 2 * r + 4)
+        return disk(r, alpha)
+            .applyingFilter("CISourceOutCompositing", parameters: [kCIInputBackgroundImageKey: disk(max(0, r - w), 1)])
+            .cropped(to: box)
+    }
 
     /// A macOS-style arrow drawn at 4x, used when no cursor image was captured.
     static func drawnArrow() -> (image: CIImage, info: CursorImage)? {
@@ -181,18 +200,16 @@ final class RenderState {
                               y: L.screenRect.minY + CGFloat(p.y) * L.screenRect.height)
             var press: CGFloat = 0
             if settings.clickEffect {
+                // A thin white ring that grows from the pointer's tip and fades (no blur).
+                let px = L.pointToCanvas * CGFloat(settings.cursorScale)
                 for c in events.clicks where c.t <= t && t - c.t < 0.45 {
                     let k = CGFloat((t - c.t) / 0.45)
                     press = max(press, 1 - k)
-                    let r = (14 + 40 * k) * L.unit * CGFloat(settings.cursorScale) / 1.6
-                    let g = CIFilter.radialGradient()
-                    g.center = CGPoint(x: pos.x, y: renderSize.height - pos.y)
-                    g.radius0 = Float(r * 0.7)
-                    g.radius1 = Float(r)
-                    g.color0 = CIColor(red: 1, green: 1, blue: 1, alpha: 0.45 * (1 - k))
-                    g.color1 = CIColor(red: 1, green: 1, blue: 1, alpha: 0)
-                    layer = g.outputImage!.cropped(to: CGRect(x: pos.x - r, y: renderSize.height - pos.y - r, width: 2 * r, height: 2 * r))
-                        .composited(over: layer)
+                    let grow = 1 - (1 - k) * (1 - k)
+                    let r = (5 + 19 * grow) * px
+                    let w = max(2 * L.unit, 1.6 * px)
+                    layer = Self.ring(center: CGPoint(x: pos.x, y: renderSize.height - pos.y), radius: r, width: w,
+                                      alpha: 0.9 * (1 - k)).composited(over: layer)
                 }
             }
             let idx = cursorIndexTrack.value(at: t) ?? nil
