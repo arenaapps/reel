@@ -1,6 +1,7 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import AppKit
+import CoreText
 
 /// Everything needed to draw any frame of a project. Immutable once built,
 /// so the compositor can use it from its own thread.
@@ -19,6 +20,8 @@ final class RenderState {
     let backgroundImage: CIImage?
     let layout: Layout
     let mappedTimeline: EditTimeline
+    /// The shortcut pill for each distinct shortcut, drawn once at output size.
+    let keyImages: [String: CIImage]
 
     struct Layout {
         let screenRect: CGRect      // top-left origin, output pixels
@@ -63,6 +66,14 @@ final class RenderState {
         }
         cursorImages = images
         fallbackCursor = Self.drawnArrow()
+        var keyImgs: [String: CIImage] = [:]
+        if settings.showKeys {
+            let u = renderSize.height / 1080 * CGFloat(settings.keysScale) * 2
+            for k in events.keys where keyImgs[k.keys.joined(separator: " ")] == nil {
+                keyImgs[k.keys.joined(separator: " ")] = Self.keyPill(k.keys, unit: u)
+            }
+        }
+        keyImages = keyImgs
         if case .image(let path) = settings.background {
             backgroundImage = CIImage(contentsOf: URL(fileURLWithPath: path))
         } else {
@@ -81,6 +92,40 @@ final class RenderState {
 
     var trimEnd: Double { min(settings.trimEnd ?? recording.duration, recording.duration) }
     var outputDuration: Double { max(0.1, mappedTimeline.length) }
+
+    /// A dark rounded pill with one key cap per label, as in the Figma sketch, at `unit` px per 1080p px.
+    static func keyPill(_ labels: [String], unit u: CGFloat) -> CIImage? {
+        let font = CTFontCreateWithName("SF Pro Text Semibold" as CFString, 20 * u, nil)
+        let lines = labels.map { l -> (CTLine, CGRect) in
+            let a = NSAttributedString(string: l, attributes: [.font: font, .foregroundColor: CGColor(gray: 1, alpha: 1)])
+            let line = CTLineCreateWithAttributedString(a)
+            return (line, CTLineGetBoundsWithOptions(line, .useOpticalBounds))
+        }
+        let capPadX = 12 * u, capPadY = 6 * u, gap = 6 * u, padX = 10 * u, padY = 8 * u
+        let textH = 20 * u * 1.2
+        let capH = textH + 2 * capPadY
+        let capWs = lines.map { max($0.1.width + 2 * capPadX, capH) }
+        let W = capWs.reduce(0, +) + gap * CGFloat(max(0, lines.count - 1)) + 2 * padX
+        let H = capH + 2 * padY
+        guard let ctx = CGContext(data: nil, width: Int(ceil(W)), height: Int(ceil(H)), bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: W, height: H), cornerWidth: 12 * u, cornerHeight: 12 * u, transform: nil))
+        ctx.setFillColor(CGColor(srgbRed: 0.08, green: 0.08, blue: 0.09, alpha: 0.82))
+        ctx.fillPath()
+        var x = padX
+        for (i, (line, b)) in lines.enumerated() {
+            let cw = capWs[i]
+            ctx.addPath(CGPath(roundedRect: CGRect(x: x, y: padY, width: cw, height: capH), cornerWidth: 7 * u, cornerHeight: 7 * u, transform: nil))
+            ctx.setFillColor(CGColor(gray: 1, alpha: 0.12))
+            ctx.fillPath()
+            ctx.textPosition = CGPoint(x: x + (cw - b.width) / 2 - b.minX, y: padY + (capH - b.height) / 2 - b.minY)
+            CTLineDraw(line, ctx)
+            x += cw + gap
+        }
+        guard let cg = ctx.makeImage() else { return nil }
+        return CIImage(cgImage: cg)
+    }
 
     /// An anti-aliased ring: a disk with a smaller disk taken out of it.
     static func ring(center: CGPoint, radius r: CGFloat, width w: CGFloat, alpha: CGFloat) -> CIImage {
@@ -140,10 +185,11 @@ final class RenderState {
         case .solid(let c):
             return CIImage(color: c.ci).cropped(to: extent)
         case .gradient(let a, let b, let angle):
-            let rad = angle * .pi / 180
+            let rad: CGFloat = CGFloat(angle) * CGFloat.pi / 180
             let c = CGPoint(x: extent.midX, y: extent.midY)
-            let half = (abs(cos(rad)) * extent.width + abs(sin(rad)) * extent.height) / 2
-            let d = CGPoint(x: cos(rad) * half, y: -sin(rad) * half)
+            let cr: CGFloat = cos(rad), sr: CGFloat = sin(rad)
+            let half: CGFloat = (abs(cr) * extent.width + abs(sr) * extent.height) / 2
+            let d = CGPoint(x: cr * half, y: -sr * half)
             let f = CIFilter.linearGradient()
             f.point0 = CGPoint(x: c.x - d.x, y: c.y - d.y)
             f.point1 = CGPoint(x: c.x + d.x, y: c.y + d.y)
@@ -304,6 +350,20 @@ final class RenderState {
                 "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.4)
             ]).applyingGaussianBlur(sigma: Double(18 * L.unit)).transformed(by: CGAffineTransform(translationX: 0, y: -6 * L.unit))
             canvas = bubble.composited(over: shadow.composited(over: canvas)).cropped(to: canvasExtent)
+        }
+        // Shortcut overlay: the latest shortcut, for 1.2 s, fixed on the canvas over the screen.
+        if settings.showKeys, let k = events.keys.last(where: { $0.t <= t }), t - k.t < 1.2,
+           let pill = keyImages[k.keys.joined(separator: " ")] {
+            let age = t - k.t
+            let alpha = CGFloat(min(1, age / 0.08, (1.2 - age) / 0.25))
+            let u = renderSize.height / 1080 * CGFloat(settings.keysScale) * 2
+            let w = pill.extent.width, h = pill.extent.height
+            let x = L.screenRect.midX - w / 2
+            let yTop = settings.keysPosition == .bottom ? L.screenRect.maxY - 16 * u - h : L.screenRect.minY + 16 * u
+            var img = pill.transformed(by: CGAffineTransform(translationX: x - pill.extent.minX,
+                                                             y: renderSize.height - yTop - h - pill.extent.minY))
+            if alpha < 0.999 { img = Self.fade(img, max(0, alpha)) }
+            canvas = img.composited(over: canvas).cropped(to: canvasExtent)
         }
         return canvas
     }

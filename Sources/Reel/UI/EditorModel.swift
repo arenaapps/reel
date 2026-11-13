@@ -27,6 +27,7 @@ final class EditorModel: ObservableObject {
     private var redoStack: [EditSettings] = [] { didSet { canRedo = !redoStack.isEmpty } }
 
     private var builtTimeline: EditTimeline?
+    private var builtMicShift: Double?
     private var rebuildTask: Task<Void, Never>?
     private var timeObserver: Any?
     private var bag: Set<AnyCancellable> = []
@@ -104,7 +105,7 @@ final class EditorModel: ObservableObject {
                 let built = try await CompositionBuilder.build(project: project, settings: s, renderSize: previewSize(source: src), fps: 30)
                 if Task.isCancelled { return }
                 let mapped = EditTimeline(s, duration: duration)
-                if let item = player.currentItem, let b = builtTimeline, b == mapped {
+                if let item = player.currentItem, let b = builtTimeline, b == mapped, builtMicShift == s.micShift {
                     // Same tracks, only the look changed: swap the drawing in place.
                     item.videoComposition = built.videoComposition
                     item.audioMix = built.audioMix
@@ -115,6 +116,7 @@ final class EditorModel: ObservableObject {
                     item.audioMix = built.audioMix
                     player.replaceCurrentItem(with: item)
                     builtTimeline = mapped
+                    builtMicShift = s.micShift
                     seek(to: source)
                 }
                 Log.render.info("preview rebuilt \(Int(built.videoComposition.renderSize.width))x\(Int(built.videoComposition.renderSize.height))")
@@ -187,6 +189,44 @@ final class EditorModel: ObservableObject {
             player.play()
         }
         isPlaying = player.rate != 0
+    }
+
+    // MARK: looks
+
+    @Published var looks: [LookPreset] = LookStore.load()
+    @Published var lookForNew: String? = LookStore.forNewRecordings
+
+    /// The saved look these settings match, Default for the built-in one, or nil when changed by hand.
+    var currentLookName: String? {
+        if settings.hasLook(of: EditSettings()) { return LookStore.builtInName }
+        return looks.first { settings.hasLook(of: $0.settings) }?.name
+    }
+
+    func applyLook(named name: String) {
+        if name == LookStore.builtInName { settings = settings.applyingLook(of: EditSettings()); return }
+        guard let l = looks.first(where: { $0.name == name }) else { return }
+        settings = settings.applyingLook(of: l.settings)
+    }
+
+    func saveLook(named raw: String) {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != LookStore.builtInName else { NSSound.beep(); return }
+        looks.removeAll { $0.name == name }
+        looks.append(LookPreset(name: name, settings: EditSettings().applyingLook(of: settings)))
+        looks.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        LookStore.save(looks)
+    }
+
+    func deleteLook(named name: String) {
+        looks.removeAll { $0.name == name }
+        LookStore.save(looks)
+        if lookForNew == name { setLookForNew(nil) }
+    }
+
+    func setLookForNew(_ name: String?) {
+        let v = name == LookStore.builtInName ? nil : name
+        LookStore.forNewRecordings = v
+        lookForNew = v
     }
 
     // MARK: split and cut

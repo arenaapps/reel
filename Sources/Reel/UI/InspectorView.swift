@@ -6,6 +6,8 @@ struct InspectorView: View {
     @ObservedObject var model: EditorModel
     @State private var tab: Tab = .background
     @State private var backgroundKind: BackgroundKind = .gradient
+    @State private var naming = false
+    @State private var newLookName = ""
 
     enum Tab: String, CaseIterable, Identifiable {
         case background = "Background", cursor = "Cursor", zoom = "Zoom", camera = "Camera", audio = "Audio"
@@ -40,6 +42,7 @@ struct InspectorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            lookBar
             HStack(spacing: 0) {
                 ForEach(Tab.allCases) { t in
                     Button { tab = t } label: {
@@ -131,6 +134,56 @@ struct InspectorView: View {
         ReelSlider(title: "Smoothing", value: $model.settings.cursorSmoothing, range: 0...1) { "\(Int(($0 * 100).rounded()))%" }
         PanelToggle(title: "Click highlight", isOn: $model.settings.clickEffect)
         PanelToggle(title: "Hide when still", isOn: $model.settings.hideIdleCursor)
+        SectionLabel("Keys")
+        PanelToggle(title: "Show shortcuts", isOn: $model.settings.showKeys)
+        Segmented(items: [(KeysPosition.bottom, "Bottom"), (.top, "Top")], selection: $model.settings.keysPosition, fill: true)
+        ReelSlider(title: "Size", value: $model.settings.keysScale, range: 0.5...1.5) { "\(Int(($0 * 100).rounded()))%" }
+        Text(model.project.events.keys.isEmpty
+             ? "No shortcuts in this recording. Tick Record shortcuts in the bar's settings menu before recording. Only keys pressed with ⌘, ⌃ or ⌥, plus Esc, Return, Tab and the arrows, are saved. Plain typing is never stored."
+             : "Only keys pressed with ⌘, ⌃ or ⌥, plus Esc, Return, Tab and the arrows, were saved. Plain typing is never stored.")
+            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: looks
+
+    private var lookBar: some View {
+        HStack(spacing: 8) {
+            Text("Look").font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
+            Menu {
+                Toggle(LookStore.builtInName, isOn: Binding(get: { model.currentLookName == LookStore.builtInName },
+                                                            set: { _ in model.applyLook(named: LookStore.builtInName) }))
+                ForEach(model.looks) { l in
+                    Toggle(l.name, isOn: Binding(get: { model.currentLookName == l.name },
+                                                 set: { _ in model.applyLook(named: l.name) }))
+                }
+                Divider()
+                Button("Save current look…") { newLookName = ""; naming = true }
+                if let name = model.currentLookName {
+                    Toggle("Use for new recordings", isOn: Binding(get: { model.lookForNew == name || (model.lookForNew == nil && name == LookStore.builtInName) },
+                                                                   set: { on in model.setLookForNew(on ? name : nil) }))
+                    if name != LookStore.builtInName {
+                        Button("Delete \(name)") { model.deleteLook(named: name) }
+                    }
+                }
+            } label: {
+                Text(model.currentLookName ?? "Custom").font(.system(size: 12, weight: .semibold))
+            }
+            .menuStyle(.borderlessButton)
+            .focusEffectDisabled()
+            .fixedSize()
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.raised))
+            Spacer()
+        }
+        .padding(.top, 14)
+        .alert("Save look", isPresented: $naming) {
+            TextField("Name", text: $newLookName)
+            Button("Save") { model.saveLook(named: newLookName) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Saves the background, frame, aspect, cursor, click ring, zoom speed, motion blur, camera bubble and keys.")
+        }
     }
 
     @ViewBuilder private var zoom: some View {
@@ -187,6 +240,23 @@ struct InspectorView: View {
         }
         if rec.hasSystemAudio {
             ReelSlider(title: "System audio", value: $model.settings.systemVolume, range: 0...2) { "\(Int(($0 * 100).rounded()))%" }
+        }
+        if rec.micFile != nil {
+            SectionLabel("Timing")
+            VStack(spacing: 6) {
+                ReelSlider(title: "Mic timing", value: $model.settings.micShift, range: -0.5...0.5) { v in
+                    let ms = Int((v * 1000).rounded())
+                    return ms == 0 ? "0 ms" : String(format: "%+d ms", ms)
+                }
+                HStack {
+                    Text("Earlier"); Spacer(); Text("Later")
+                }
+                .font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
+            }
+            .simultaneousGesture(TapGesture(count: 2).onEnded { model.settings.micShift = 0 })
+            Text("Moves your voice against the video, up to half a second either way. Use it when a Bluetooth mic arrives late. Double-click resets it to 0.")
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                .fixedSize(horizontal: false, vertical: true)
         }
         if rec.micFile == nil && !rec.hasSystemAudio {
             Text("No audio was recorded.").font(.system(size: 12)).foregroundStyle(.white.opacity(0.5))

@@ -196,6 +196,7 @@ struct BarView: View {
     private func showSettingsMenu(at anchor: NSPoint) {
         let m = ClosureMenu()
         m.item("Count down 3, 2, 1 before recording", checked: model.countdownEnabled) { model.countdownEnabled.toggle() }
+        m.item("Record shortcuts", checked: model.recordShortcuts) { model.recordShortcuts.toggle() }
         m.addItem(.separator())
         m.note("Saving to \(ReelProject.libraryFolder.lastPathComponent)")
         m.item("Change save folder…") { model.chooseSaveFolder() }

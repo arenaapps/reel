@@ -26,10 +26,34 @@ struct CursorImage: Codable, Equatable {
     var height: Double
 }
 
+/// A keyboard shortcut pressed while recording, as the labels to show (for example ⌘ ⇧ 4).
+/// Only shortcuts are kept: plain typing is never recorded.
+struct KeyEvent: Codable, Equatable {
+    var t: Double
+    var keys: [String]
+}
+
 struct RecordingEvents: Codable {
     var samples: [CursorSample] = []
     var clicks: [ClickEvent] = []
     var cursors: [CursorImage] = []
+    var keys: [KeyEvent] = []
+
+    init(samples: [CursorSample] = [], clicks: [ClickEvent] = [], cursors: [CursorImage] = [], keys: [KeyEvent] = []) {
+        self.samples = samples
+        self.clicks = clicks
+        self.cursors = cursors
+        self.keys = keys
+    }
+
+    /// Files from before shortcuts were recorded have no "keys".
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        samples = try c.decodeIfPresent([CursorSample].self, forKey: .samples) ?? []
+        clicks = try c.decodeIfPresent([ClickEvent].self, forKey: .clicks) ?? []
+        cursors = try c.decodeIfPresent([CursorImage].self, forKey: .cursors) ?? []
+        keys = try c.decodeIfPresent([KeyEvent].self, forKey: .keys) ?? []
+    }
 }
 
 /// What was recorded and where the files are.
@@ -215,6 +239,11 @@ extension EditSettings {
     }
 }
 
+enum KeysPosition: String, Codable, CaseIterable, Identifiable {
+    case bottom, top
+    var id: String { rawValue }
+}
+
 struct EditSettings: Codable, Equatable {
     var background: BackgroundStyle = .gradient(RGBA(r: 0.40, g: 0.33, b: 0.95), RGBA(r: 0.95, g: 0.45, b: 0.62), angle: 135)
     var aspect: AspectPreset = .wide16x9
@@ -232,6 +261,10 @@ struct EditSettings: Codable, Equatable {
     var splits: [Double] = []           // recording times where the clip is split
     var cuts: [CutRange] = []           // pieces left out of the video
     var speeds: [SpeedRange] = []       // pieces played faster
+    var micShift: Double = 0            // seconds; positive plays the voice later
+    var showKeys = true                 // keystroke overlay, when shortcuts were recorded
+    var keysPosition: KeysPosition = .bottom
+    var keysScale: Double = 1
     var showCamera = true
     var cameraCorner: CameraCorner = .bottomLeft
     var cameraShape: CameraShape = .circle
@@ -264,6 +297,10 @@ struct EditSettings: Codable, Equatable {
         splits = try v(.splits, d.splits)
         cuts = try v(.cuts, d.cuts)
         speeds = try v(.speeds, d.speeds)
+        micShift = try v(.micShift, d.micShift)
+        showKeys = try v(.showKeys, d.showKeys)
+        keysPosition = try v(.keysPosition, d.keysPosition)
+        keysScale = try v(.keysScale, d.keysScale)
         showCamera = try v(.showCamera, d.showCamera)
         cameraCorner = try v(.cameraCorner, d.cameraCorner)
         cameraShape = try v(.cameraShape, d.cameraShape)
@@ -335,5 +372,75 @@ final class ReelProject: ObservableObject, Identifiable {
         return urls.filter { $0.pathExtension == "reel" }
             .compactMap { try? load($0) }
             .sorted { $0.document.recording.createdAt > $1.document.recording.createdAt }
+    }
+}
+
+// MARK: looks (presets)
+
+extension EditSettings {
+    /// These settings with the look of `other`: background, frame, aspect, cursor, click ring,
+    /// zoom speed, motion blur, camera bubble and keys. Zooms, trims, cuts, speed and volumes stay.
+    func applyingLook(of o: EditSettings) -> EditSettings {
+        var s = self
+        s.background = o.background
+        s.aspect = o.aspect
+        s.padding = o.padding
+        s.cornerRadius = o.cornerRadius
+        s.shadow = o.shadow
+        s.cursorScale = o.cursorScale
+        s.cursorSmoothing = o.cursorSmoothing
+        s.showCursor = o.showCursor
+        s.clickEffect = o.clickEffect
+        s.zoomSpeed = o.zoomSpeed
+        s.cameraCorner = o.cameraCorner
+        s.cameraShape = o.cameraShape
+        s.cameraSize = o.cameraSize
+        s.hideIdleCursor = o.hideIdleCursor
+        s.motionBlur = o.motionBlur
+        s.showKeys = o.showKeys
+        s.keysPosition = o.keysPosition
+        s.keysScale = o.keysScale
+        return s
+    }
+
+    func hasLook(of o: EditSettings) -> Bool { applyingLook(of: o) == self }
+}
+
+struct LookPreset: Codable, Equatable, Identifiable {
+    var name: String
+    var settings: EditSettings
+    var id: String { name }
+}
+
+/// Saved looks in ~/Library/Application Support/Reel/looks.json, and which one new recordings use.
+enum LookStore {
+    static let builtInName = "Default"
+    private static var url: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Reel", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("looks.json")
+    }
+
+    static func load() -> [LookPreset] {
+        guard let d = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder().decode([LookPreset].self, from: d)) ?? []
+    }
+
+    static func save(_ looks: [LookPreset]) {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try? e.encode(looks).write(to: url, options: .atomic)
+    }
+
+    /// Name of the look new recordings start with; nil means the built-in default.
+    static var forNewRecordings: String? {
+        get { UserDefaults.standard.string(forKey: "lookForNewRecordings") }
+        set { UserDefaults.standard.set(newValue, forKey: "lookForNewRecordings") }
+    }
+
+    static func lookForNewRecordings() -> EditSettings? {
+        guard let name = forNewRecordings else { return nil }
+        return load().first { $0.name == name }?.settings
     }
 }

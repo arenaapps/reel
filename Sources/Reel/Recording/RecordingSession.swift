@@ -62,6 +62,7 @@ struct RecordingOptions {
     var systemAudio: Bool
     var cameraShape: CameraShape = .circle
     var cameraOrientation: CameraOrientation = .auto
+    var recordKeys = false
 }
 
 /// One recording from start to finished project folder.
@@ -111,7 +112,7 @@ final class RecordingSession {
         }
         screen = recorder
         if let frame = options.source.frame {
-            let t = InputTracker(area: frame, folder: folder)
+            let t = InputTracker(area: frame, folder: folder, recordKeys: options.recordKeys)
             tracker = t
             t.start()
         }
@@ -171,15 +172,19 @@ final class RecordingSession {
             info.micOffset = ms.seconds - start
         }
 
+        // Start from the chosen look, if any; the bar's camera shape for this take wins.
         var settings = EditSettings()
+        if let look = LookStore.lookForNewRecordings() { settings = settings.applyingLook(of: look) }
         settings.zooms = ZoomPlanner.autoZooms(clicks: events.clicks, duration: duration)
         settings.showCamera = info.cameraFile != nil
         settings.cameraShape = options.cameraShape
+        // Window, area and phone recordings fit their own shape, unless a saved look chose one.
+        let lookChoseAspect = LookStore.lookForNewRecordings() != nil
         switch options.source {
         case .display: break
-        case .window, .area: settings.aspect = .auto
+        case .window, .area: if !lookChoseAspect { settings.aspect = .auto }
         case .device:
-            settings.aspect = .auto
+            if !lookChoseAspect { settings.aspect = .auto }
             settings.showCursor = false
         }
 

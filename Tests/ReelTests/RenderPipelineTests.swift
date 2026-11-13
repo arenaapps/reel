@@ -116,4 +116,37 @@ final class RenderPipelineTests: XCTestCase {
         let duration = try await AVURLAsset(url: out).load(.duration).seconds
         XCTAssertEqual(duration, 5, accuracy: 0.2)
     }
+
+    /// A recorded shortcut shows as a pill over the screen.
+    func testShortcutOverlayFrame() async throws {
+        guard let path = ProcessInfo.processInfo.environment["REEL_FIXTURE"] else { throw XCTSkip("REEL_FIXTURE not set") }
+        let folder = URL(fileURLWithPath: path)
+        var info = RecordingInfo()
+        info.duration = 6
+        info.sourcePointWidth = 1440
+        info.sourcePointHeight = 900
+        info.cameraFile = "camera.mov"
+        info.micFile = "mic.m4a"
+        var events = try JSONDecoder().decode(RecordingEvents.self, from: Data(contentsOf: folder.appendingPathComponent("events.json")))
+        events.keys = [KeyEvent(t: 2, keys: ["⇧", "⌘", "4"])]
+        var settings = EditSettings()
+        settings.micShift = 0.2
+        let doc = ProjectDocument(name: "fixture", recording: info, settings: settings)
+        try ReelProject.write(doc, to: folder.appendingPathComponent("project.json"))
+        try ReelProject.write(events, to: folder.appendingPathComponent("events.json"))
+        let project = try ReelProject.load(folder)
+        let built = try await CompositionBuilder.build(project: project, settings: settings, renderSize: CGSize(width: 1920, height: 1080), fps: 30)
+        let gen = AVAssetImageGenerator(asset: built.composition)
+        gen.videoComposition = built.videoComposition
+        gen.requestedTimeToleranceBefore = .zero
+        gen.requestedTimeToleranceAfter = .zero
+        let (cg, _) = try await gen.image(at: CMTime(seconds: 2.5, preferredTimescale: 600))
+        try NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])!
+            .write(to: folder.appendingPathComponent("keys-2.5.png"))
+        // Mic shifted 0.2 s later: its track starts later in the composition.
+        let mic = built.composition.tracks(withMediaType: .audio).last
+        let first = mic?.segments.first { !$0.isEmpty }
+        XCTAssertNotNil(first)
+        XCTAssertGreaterThan(first!.timeMapping.target.start.seconds, 0.15)
+    }
 }

@@ -7,6 +7,8 @@ final class InputTracker {
     private(set) var samples: [CursorSample] = []
     private(set) var clicks: [ClickEvent] = []
     private(set) var cursors: [CursorImage] = []
+    private(set) var keys: [KeyEvent] = []
+    private let recordKeys: Bool
 
     private let area: CGRect          // captured area in global CG coordinates (top-left origin)
     private let folder: URL
@@ -17,9 +19,10 @@ final class InputTracker {
     private var lastCursorCheck = 0.0
     private let lock = NSLock()
 
-    init(area: CGRect, folder: URL) {
+    init(area: CGRect, folder: URL, recordKeys: Bool = false) {
         self.area = area
         self.folder = folder
+        self.recordKeys = recordKeys
     }
 
     func start() {
@@ -32,6 +35,15 @@ final class InputTracker {
         }
         if let l = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] e in self?.click(e); return e }) {
             monitors.append(l)
+        }
+        // Shortcuts only. Global key events need Accessibility permission; without it this sees nothing.
+        if recordKeys {
+            if let g = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: { [weak self] e in self?.key(e) }) {
+                monitors.append(g)
+            }
+            if let l = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { [weak self] e in self?.key(e); return e }) {
+                monitors.append(l)
+            }
         }
         poll()
     }
@@ -69,6 +81,44 @@ final class InputTracker {
         }
         samples.append(CursorSample(t: now, x: x, y: y, cursor: cursorChange))
         lock.unlock()
+    }
+
+    private func key(_ e: NSEvent) {
+        guard !e.isARepeat, let labels = Self.shortcutLabels(e) else { return }
+        lock.lock()
+        keys.append(KeyEvent(t: CACurrentMediaTime(), keys: labels))
+        lock.unlock()
+    }
+
+    /// Labels for a shortcut, or nil for plain typing (which is never recorded).
+    static func shortcutLabels(_ e: NSEvent) -> [String]? {
+        let m = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let named: [UInt16: String] = [53: "esc", 36: "↩", 76: "↩", 48: "⇥", 123: "←", 124: "→", 125: "↓", 126: "↑",
+                                       51: "⌫", 117: "⌦", 49: "Space"]
+        let hasCommandKey = m.contains(.command) || m.contains(.control) || m.contains(.option)
+        let isNamedAlone = [53, 36, 76, 48, 123, 124, 125, 126].contains(Int(e.keyCode))
+        guard hasCommandKey || isNamedAlone else { return nil }
+        var out: [String] = []
+        if m.contains(.control) { out.append("⌃") }
+        if m.contains(.option) { out.append("⌥") }
+        if m.contains(.shift) { out.append("⇧") }
+        if m.contains(.command) { out.append("⌘") }
+        if let n = named[e.keyCode] {
+            out.append(n)
+        } else if let fn = Self.functionKey(e.keyCode) {
+            out.append(fn)
+        } else if let c = e.charactersIgnoringModifiers?.uppercased(), !c.isEmpty,
+                  c.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) {
+            out.append(c)
+        } else {
+            return nil
+        }
+        return out
+    }
+
+    private static func functionKey(_ code: UInt16) -> String? {
+        let map: [UInt16: Int] = [122: 1, 120: 2, 99: 3, 118: 4, 96: 5, 97: 6, 98: 7, 100: 8, 101: 9, 109: 10, 103: 11, 111: 12]
+        return map[code].map { "F\($0)" }
     }
 
     private func click(_ e: NSEvent) {
@@ -121,6 +171,9 @@ final class InputTracker {
         let c = clicks.filter { !pause.isInPause($0.t) }
             .map { ClickEvent(t: pause.toRecording($0.t) - start, x: $0.x, y: $0.y, button: $0.button) }
             .filter { $0.t >= 0 && $0.t <= duration }
-        return RecordingEvents(samples: kept, clicks: c, cursors: cursors)
+        let k = keys.filter { !pause.isInPause($0.t) }
+            .map { KeyEvent(t: pause.toRecording($0.t) - start, keys: $0.keys) }
+            .filter { $0.t >= 0 && $0.t <= duration }
+        return RecordingEvents(samples: kept, clicks: c, cursors: cursors, keys: k)
     }
 }

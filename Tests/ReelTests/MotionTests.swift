@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import Reel
 
 final class MotionTests: XCTestCase {
@@ -136,5 +137,47 @@ final class MotionTests: XCTestCase {
         s.cuts = [CutRange(start: 2, end: 4)]
         let m = EditTimeline(s, duration: 6)
         XCTAssertEqual(m.length, 1, accuracy: 1e-9)               // (2 + 2) / 4
+    }
+
+    private func keyEvent(_ chars: String, code: UInt16, _ mods: NSEvent.ModifierFlags) -> NSEvent {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil,
+                         characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)!
+    }
+
+    func testPlainTypingIsNeverRecorded() {
+        XCTAssertNil(InputTracker.shortcutLabels(keyEvent("a", code: 0, [])))
+        XCTAssertNil(InputTracker.shortcutLabels(keyEvent("A", code: 0, [.shift])))
+        XCTAssertNil(InputTracker.shortcutLabels(keyEvent("1", code: 18, [])))
+        XCTAssertNil(InputTracker.shortcutLabels(keyEvent(" ", code: 49, [])))
+    }
+
+    func testShortcutsAreRecorded() {
+        XCTAssertEqual(InputTracker.shortcutLabels(keyEvent("4", code: 21, [.command, .shift])), ["⇧", "⌘", "4"])
+        XCTAssertEqual(InputTracker.shortcutLabels(keyEvent("c", code: 8, [.command])), ["⌘", "C"])
+        XCTAssertEqual(InputTracker.shortcutLabels(keyEvent("\u{1b}", code: 53, [])), ["esc"])
+    }
+
+    func testLookKeepsEdits() {
+        var mine = EditSettings()
+        mine.zooms = [ZoomSegment(start: 1, end: 2)]
+        mine.cuts = [CutRange(start: 3, end: 4)]
+        mine.micVolume = 0.4
+        var look = EditSettings()
+        look.padding = 0.2
+        look.aspect = .vertical9x16
+        look.zooms = []
+        let out = mine.applyingLook(of: look)
+        XCTAssertEqual(out.padding, 0.2)
+        XCTAssertEqual(out.aspect, .vertical9x16)
+        XCTAssertEqual(out.zooms.count, 1)
+        XCTAssertEqual(out.cuts.count, 1)
+        XCTAssertEqual(out.micVolume, 0.4)
+        XCTAssertTrue(out.hasLook(of: look))
+    }
+
+    func testOldEventsFilesHaveNoKeys() throws {
+        let json = #"{"samples": [], "clicks": [], "cursors": []}"#.data(using: .utf8)!
+        let e = try JSONDecoder().decode(RecordingEvents.self, from: json)
+        XCTAssertTrue(e.keys.isEmpty)
     }
 }

@@ -139,7 +139,7 @@ enum CompositionBuilder {
             let asset = AVURLAsset(url: url)
             if let track = try await asset.loadTracks(withMediaType: .audio).first {
                 let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)!
-                try insert(track, fileDuration: try await asset.load(.duration).seconds, offset: rec.micOffset, into: t, isAudio: true)
+                try insert(track, fileDuration: try await asset.load(.duration).seconds, offset: rec.micOffset + settings.micShift, into: t, isAudio: true)
                 let p = AVMutableAudioMixInputParameters(track: t)
                 p.setVolume(Float(settings.micVolume), at: .zero)
                 params.append(p)

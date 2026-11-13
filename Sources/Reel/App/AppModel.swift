@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import ScreenCaptureKit
 import Carbon.HIToolbox
+import ApplicationServices
 
 enum CaptureMode: String, CaseIterable, Identifiable {
     case display, window, area, device
@@ -54,6 +55,16 @@ final class AppModel: ObservableObject {
     @Published var countdownEnabled: Bool { didSet { defaults.set(countdownEnabled, forKey: "countdown") } }
     @Published var cameraShape: CameraShape { didSet { defaults.set(cameraShape.rawValue, forKey: "cameraShape") } }
     @Published var cameraOrientation: CameraOrientation { didSet { defaults.set(cameraOrientation.rawValue, forKey: "cameraOrientation") } }
+    /// Record keyboard shortcuts for the overlay. Needs Accessibility permission; asks when turned on.
+    @Published var recordShortcuts: Bool {
+        didSet {
+            defaults.set(recordShortcuts, forKey: "recordShortcuts")
+            if recordShortcuts && !AXIsProcessTrusted() {
+                let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+                _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+            }
+        }
+    }
 
     private let defaults = UserDefaults.standard
     private var session: RecordingSession?
@@ -74,6 +85,7 @@ final class AppModel: ObservableObject {
         countdownEnabled = d.object(forKey: "countdown") as? Bool ?? true
         cameraShape = CameraShape(rawValue: d.string(forKey: "cameraShape") ?? "") ?? .circle
         cameraOrientation = CameraOrientation(rawValue: d.string(forKey: "cameraOrientation") ?? "") ?? .auto
+        recordShortcuts = d.bool(forKey: "recordShortcuts")
 
         hotKey = HotKey(keyCode: UInt32(kVK_ANSI_2), modifiers: UInt32(cmdKey | shiftKey)) { [weak self] in
             Task { @MainActor in self?.toggleRecording() }
@@ -180,7 +192,8 @@ final class AppModel: ObservableObject {
         var isDevice = false
         if case .device = source { isDevice = true }
         let options = RecordingOptions(source: source, camera: selectedCamera, mic: selectedMic,
-                                       systemAudio: systemAudio && !isDevice, cameraShape: cameraShape, cameraOrientation: cameraOrientation)
+                                       systemAudio: systemAudio && !isDevice, cameraShape: cameraShape, cameraOrientation: cameraOrientation,
+                                       recordKeys: recordShortcuts)
         do {
             let s = try RecordingSession(options: options)
             try s.prepare()
