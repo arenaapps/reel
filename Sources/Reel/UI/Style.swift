@@ -8,6 +8,7 @@ enum Palette {
     static let red = Color(red: 0.89, green: 0.24, blue: 0.2)
     static let zoom = Color(red: 0.55, green: 0.45, blue: 0.98)
     static let clip = Color(red: 0.98, green: 0.78, blue: 0.3)
+    static let speed = Color(red: 0.35, green: 0.8, blue: 0.95)
     static let ink = Color(red: 0.08, green: 0.08, blue: 0.09)
 }
 

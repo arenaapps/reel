@@ -94,16 +94,22 @@ enum CompositionBuilder {
 
         /// Inserts the kept stretches of a file that starts `offset` seconds into the recording,
         /// back to back, so cuts and trimmed ends drop out of the video.
-        func insert(_ track: AVAssetTrack, fileDuration: Double, offset: Double, into dst: AVMutableCompositionTrack) throws {
+        /// Faster stretches are squeezed with scaleTimeRange. Sound above 2x is left out: too fast to follow.
+        func insert(_ track: AVAssetTrack, fileDuration: Double, offset: Double, into dst: AVMutableCompositionTrack,
+                    isAudio: Bool = false) throws {
             var at = 0.0
             for r in kept {
+                defer { at += r.played }
+                if isAudio && r.speed > 2.001 { continue }
                 let fs = max(0, r.start - offset)
                 let fe = min(fileDuration, r.end - offset)
-                let lead = max(0, offset - r.start)
-                if fe - fs > 0.01 {
-                    try dst.insertTimeRange(CMTimeRange(start: cm(fs), duration: cm(fe - fs)), of: track, at: cm(at + lead))
+                let lead = max(0, offset - r.start) / r.speed
+                guard fe - fs > 0.01 else { continue }
+                let pos = cm(at + lead)
+                try dst.insertTimeRange(CMTimeRange(start: cm(fs), duration: cm(fe - fs)), of: track, at: pos)
+                if abs(r.speed - 1) > 1e-6 {
+                    dst.scaleTimeRange(CMTimeRange(start: pos, duration: cm(fe - fs)), toDuration: cm((fe - fs) / r.speed))
                 }
-                at += r.end - r.start
             }
         }
 
@@ -114,7 +120,7 @@ enum CompositionBuilder {
         var params: [AVMutableAudioMixInputParameters] = []
         if rec.hasSystemAudio, let audio = try await screenAsset.loadTracks(withMediaType: .audio).first {
             let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)!
-            try insert(audio, fileDuration: screenDuration, offset: 0, into: t)
+            try insert(audio, fileDuration: screenDuration, offset: 0, into: t, isAudio: true)
             let p = AVMutableAudioMixInputParameters(track: t)
             p.setVolume(Float(settings.systemVolume), at: .zero)
             params.append(p)
@@ -133,7 +139,7 @@ enum CompositionBuilder {
             let asset = AVURLAsset(url: url)
             if let track = try await asset.loadTracks(withMediaType: .audio).first {
                 let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)!
-                try insert(track, fileDuration: try await asset.load(.duration).seconds, offset: rec.micOffset, into: t)
+                try insert(track, fileDuration: try await asset.load(.duration).seconds, offset: rec.micOffset, into: t, isAudio: true)
                 let p = AVMutableAudioMixInputParameters(track: t)
                 p.setVolume(Float(settings.micVolume), at: .zero)
                 params.append(p)

@@ -119,18 +119,32 @@ struct CutRange: Codable, Equatable {
     var end: Double
 }
 
+/// A stretch of the recording played faster.
+struct SpeedRange: Codable, Equatable {
+    var start: Double
+    var end: Double
+    var rate: Double
+}
+
 /// One piece of the clip between two splits (or a trim edge), in recording time.
 struct ClipPiece: Equatable {
     var start: Double
     var end: Double
     var isCut: Bool
+    var speed: Double = 1
+    var playedLength: Double { (end - start) / speed }
     var mid: Double { (start + end) / 2 }
 }
 
 /// Maps between video time (what plays) and recording time (what was captured),
 /// skipping the trimmed ends and every cut.
 struct EditTimeline: Equatable {
-    struct Range: Equatable { var start: Double; var end: Double }
+    struct Range: Equatable {
+        var start: Double
+        var end: Double
+        var speed: Double = 1
+        var played: Double { (end - start) / speed }
+    }
     let kept: [Range]
 
     init(_ s: EditSettings, duration: Double) {
@@ -145,19 +159,30 @@ struct EditTimeline: Equatable {
                 return out
             }
         }
+        // Faster stretches split the kept ranges further.
+        for sp in s.speeds where sp.rate > 0 && abs(sp.rate - 1) > 1e-6 {
+            ranges = ranges.flatMap { r -> [Range] in
+                let lo = max(r.start, sp.start), hi = min(r.end, sp.end)
+                guard hi - lo > 0.005 else { return [r] }
+                var out: [Range] = []
+                if lo > r.start + 0.005 { out.append(Range(start: r.start, end: lo, speed: r.speed)) }
+                out.append(Range(start: lo, end: hi, speed: sp.rate))
+                if hi < r.end - 0.005 { out.append(Range(start: hi, end: r.end, speed: r.speed)) }
+                return out
+            }
+        }
         // Everything cut: keep a sliver so the player always has something to show.
         kept = ranges.isEmpty ? [Range(start: a, end: min(b, a + 0.1))] : ranges.sorted { $0.start < $1.start }
     }
 
-    var length: Double { kept.reduce(0) { $0 + $1.end - $1.start } }
+    var length: Double { kept.reduce(0) { $0 + $1.played } }
 
     /// Recording time for a moment of the video.
     func source(at out: Double) -> Double {
         var o = max(0, out)
         for r in kept {
-            let l = r.end - r.start
-            if o <= l { return r.start + o }
-            o -= l
+            if o <= r.played { return r.start + o * r.speed }
+            o -= r.played
         }
         return kept.last!.end
     }
@@ -167,8 +192,8 @@ struct EditTimeline: Equatable {
         var acc = 0.0
         for r in kept {
             if src < r.start { return acc }
-            if src <= r.end { return acc + src - r.start }
-            acc += r.end - r.start
+            if src <= r.end { return acc + (src - r.start) / r.speed }
+            acc += r.played
         }
         return acc
     }
@@ -184,7 +209,8 @@ extension EditSettings {
         let edges = [a] + inner + [b]
         return zip(edges, edges.dropFirst()).map { s, e in
             let m = (s + e) / 2
-            return ClipPiece(start: s, end: e, isCut: cuts.contains { $0.start <= m && m <= $0.end })
+            return ClipPiece(start: s, end: e, isCut: cuts.contains { $0.start <= m && m <= $0.end },
+                             speed: speeds.first { $0.start <= m && m <= $0.end }?.rate ?? 1)
         }
     }
 }
@@ -205,6 +231,7 @@ struct EditSettings: Codable, Equatable {
     var trimEnd: Double?                // nil = end of recording
     var splits: [Double] = []           // recording times where the clip is split
     var cuts: [CutRange] = []           // pieces left out of the video
+    var speeds: [SpeedRange] = []       // pieces played faster
     var showCamera = true
     var cameraCorner: CameraCorner = .bottomLeft
     var cameraShape: CameraShape = .circle
@@ -236,6 +263,7 @@ struct EditSettings: Codable, Equatable {
         trimEnd = try c.decodeIfPresent(Double.self, forKey: .trimEnd)
         splits = try v(.splits, d.splits)
         cuts = try v(.cuts, d.cuts)
+        speeds = try v(.speeds, d.speeds)
         showCamera = try v(.showCamera, d.showCamera)
         cameraCorner = try v(.cameraCorner, d.cameraCorner)
         cameraShape = try v(.cameraShape, d.cameraShape)

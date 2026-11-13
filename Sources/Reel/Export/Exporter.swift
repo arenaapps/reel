@@ -37,6 +37,7 @@ enum Exporter {
             }
             session.videoComposition = built.videoComposition
             session.audioMix = built.audioMix
+            session.audioTimePitchAlgorithm = .spectral     // sped-up voice keeps its pitch
             session.outputURL = url
             session.outputFileType = .mp4
             session.shouldOptimizeForNetworkUse = true

@@ -170,7 +170,7 @@ struct EditorView: View {
                 .help("Zoom the timeline: pinch, ⌘ + scroll, ⌘= and ⌘−")
             }
             TimelineView(model: model, viewport: viewport)
-                .frame(height: 150)
+                .frame(height: 190)
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.panel))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
@@ -241,6 +241,12 @@ struct EditorKeys: NSViewRepresentable {
                 m.togglePlay(); return true
             case 1 where mods.isEmpty:                        // S
                 m.split(); return true
+            case 30 where mods.isEmpty:                       // ]
+                guard m.selectedPiece != nil else { return false }
+                m.stepSelectedPieceSpeed(1); return true
+            case 33 where mods.isEmpty:                       // [
+                guard m.selectedPiece != nil else { return false }
+                m.stepSelectedPieceSpeed(-1); return true
             case 51, 117:                                     // delete, forward delete
                 if m.selectedZoom != nil { m.deleteSelectedZoom(); return true }
                 if m.selectedPiece != nil { m.toggleSelectedPieceCut(); return true }
@@ -334,7 +340,8 @@ struct TimelineView: View {
     enum DragKind { case move, start, end }
     struct DragState { let id: UUID; let kind: DragKind; let original: ZoomSegment }
 
-    private let clipY: CGFloat = 32, clipH: CGFloat = 46, zoomY: CGFloat = 88, zoomH: CGFloat = 32
+    // The top 40 points hold the Speed bar for a selected piece.
+    private let clipY: CGFloat = 72, clipH: CGFloat = 46, zoomY: CGFloat = 128, zoomH: CGFloat = 32
 
     var body: some View {
         GeometryReader { outer in
@@ -387,8 +394,8 @@ struct TimelineView: View {
                 }
                 // Playhead
                 let px = x(model.currentTime)
-                Rectangle().fill(.white).frame(width: 2, height: 130).offset(x: px - 1, y: 20).allowsHitTesting(false)
-                RoundedRectangle(cornerRadius: 3).fill(.white).frame(width: 12, height: 12).offset(x: px - 6, y: 14)
+                Rectangle().fill(.white).frame(width: 2, height: 130).offset(x: px - 1, y: 60).allowsHitTesting(false)
+                RoundedRectangle(cornerRadius: 3).fill(.white).frame(width: 12, height: 12).offset(x: px - 6, y: 54)
                     .allowsHitTesting(false)
                 // Where the view sits along the recording, when zoomed in
                 if viewport.scale > 1.01 {
@@ -400,6 +407,12 @@ struct TimelineView: View {
                         .frame(width: max(24, w * frac), height: 4)
                         .offset(x: 16 + w * viewport.offset / viewport.contentWidth, y: outer.size.height - 10)
                         .allowsHitTesting(false)
+                }
+                if let sel = model.selectedPieceInfo, !sel.isCut {
+                    SpeedBar(speed: sel.speed) { model.setSelectedPieceSpeed($0) }
+                        .fixedSize()
+                        .alignmentGuide(.leading) { d in d.width / 2 - min(max(x(sel.mid), d.width / 2 + 8), outer.size.width - d.width / 2 - 8) }
+                        .offset(y: 6)
                 }
                 ScrollCatcher(viewport: viewport, duration: dur).allowsHitTesting(false)
             }
@@ -423,8 +436,27 @@ struct TimelineView: View {
                 shape.strokeBorder(Palette.clip.opacity(0.9), lineWidth: 1.5)
             }
             if selected { shape.strokeBorder(.white, lineWidth: 2) }
+            if p.speed > 1.001 {
+                // Faint chevrons along the bottom and a badge: this piece plays faster.
+                HStack(spacing: 10) {
+                    ForEach(0..<max(0, Int((w - 28) / 18)), id: \.self) { _ in
+                        Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
+                    }
+                }
+                .foregroundStyle(Palette.speed.opacity(0.45))
+                .padding(.leading, 14).padding(.top, 28)
+                .allowsHitTesting(false)
+                Text(Self.speedLabel(p.speed))
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.ink)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Palette.speed.opacity(0.9)))
+                    .frame(width: w - 8, alignment: .trailing).padding(.top, 8)
+                    .opacity(w > 50 ? 1 : 0)
+            }
             VStack(alignment: .leading, spacing: 3) {
-                Text(p.isCut ? "Cut" : String(format: "%.1f s", p.end - p.start))
+                Text(p.isCut ? "Cut" : p.speed > 1.001
+                     ? String(format: "%.1f s  →  %.1f s", p.end - p.start, p.playedLength)
+                     : String(format: "%.1f s", p.end - p.start))
                     .font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(p.isCut ? 0.45 : 0.85))
                 if p.isCut {
                     Text("Skipped in the video").font(.system(size: 10)).foregroundStyle(.white.opacity(0.4))
@@ -440,7 +472,11 @@ struct TimelineView: View {
             model.selectedPiece = p.start
             model.seek(to: t(v.location.x))
         })
-        .help(p.isCut ? "Cut. Select it and press Delete to bring it back." : "Click to select. Delete cuts it out of the video.")
+        .help("Click to select. Delete cuts it out of the video; [ and ] change its speed.")
+    }
+
+    static func speedLabel(_ r: Double) -> String {
+        r == r.rounded() ? String(format: "%.0f×", r) : String(format: "%.1f×", r)
     }
 
     private func splitHandle(at s: Double, x: @escaping (Double) -> CGFloat, t: @escaping (CGFloat) -> Double) -> some View {
@@ -467,11 +503,11 @@ struct TimelineView: View {
         return ZStack(alignment: .topLeading) {
             ForEach(Array(ticks.enumerated()), id: \.offset) { i, s in
                 let major = i % 5 == 0
-                Rectangle().fill(.white.opacity(major ? 0.35 : 0.18)).frame(width: 1, height: major ? 8 : 4).offset(x: x(s), y: 10)
+                Rectangle().fill(.white.opacity(major ? 0.35 : 0.18)).frame(width: 1, height: major ? 8 : 4).offset(x: x(s), y: 50)
                 if major {
                     Text(String(format: "%d:%02d", Int(s) / 60, Int(s) % 60))
                         .font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.4))
-                        .offset(x: x(s) + 4, y: 6)
+                        .offset(x: x(s) + 4, y: 46)
                 }
             }
         }
@@ -600,5 +636,34 @@ struct ScrollCatcher: NSViewRepresentable {
         }
         // Not flipped-aware in SwiftUI's sense, but only x is used.
         deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+    }
+}
+
+/// 1x to 8x for the selected piece, floating above it on the timeline.
+struct SpeedBar: View {
+    let speed: Double
+    let set: (Double) -> Void
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("Speed").font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.5))
+                .padding(.horizontal, 4)
+            ForEach(EditorModel.speedSteps, id: \.self) { r in
+                let on = abs(r - speed) < 1e-6
+                Button { set(r) } label: {
+                    Text(TimelineView.speedLabel(r))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(on ? Palette.ink : .white.opacity(0.8))
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(on ? Color.white : .clear))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.raised))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.1)))
+        .shadow(color: .black.opacity(0.4), radius: 8, y: 6)
+        .help("Speed of the selected piece ([ slower, ] faster)")
     }
 }

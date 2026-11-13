@@ -115,4 +115,26 @@ final class MotionTests: XCTestCase {
         XCTAssertTrue(s.splits.isEmpty)
         XCTAssertTrue(s.cuts.isEmpty)
     }
+
+    func testSpeedShortensItsPiece() {
+        var s = EditSettings()
+        s.splits = [2, 4]
+        s.speeds = [SpeedRange(start: 2, end: 4, rate: 2)]
+        let m = EditTimeline(s, duration: 6)
+        XCTAssertEqual(m.length, 5, accuracy: 1e-9)               // 2 + 1 + 2
+        XCTAssertEqual(m.source(at: 2.5), 3, accuracy: 1e-9)      // halfway through the fast piece
+        XCTAssertEqual(m.output(at: 4), 3, accuracy: 1e-9)
+        XCTAssertEqual(m.source(at: 4), 5, accuracy: 1e-9)
+        let pieces = s.pieces(duration: 6)
+        XCTAssertEqual(pieces.map(\.speed), [1, 2, 1])
+        XCTAssertEqual(pieces[1].playedLength, 1, accuracy: 1e-9)
+    }
+
+    func testCutInsideFastStretch() {
+        var s = EditSettings()
+        s.speeds = [SpeedRange(start: 0, end: 6, rate: 4)]
+        s.cuts = [CutRange(start: 2, end: 4)]
+        let m = EditTimeline(s, duration: 6)
+        XCTAssertEqual(m.length, 1, accuracy: 1e-9)               // (2 + 2) / 4
+    }
 }

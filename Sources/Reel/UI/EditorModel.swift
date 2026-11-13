@@ -110,6 +110,7 @@ final class EditorModel: ObservableObject {
                     item.audioMix = built.audioMix
                 } else {
                     let item = AVPlayerItem(asset: built.composition)
+                    item.audioTimePitchAlgorithm = .spectral
                     item.videoComposition = built.videoComposition
                     item.audioMix = built.audioMix
                     player.replaceCurrentItem(with: item)
@@ -232,6 +233,32 @@ final class EditorModel: ObservableObject {
         seek(to: currentTime)
     }
 
+    static let speedSteps: [Double] = [1, 1.5, 2, 4, 8]
+
+    var selectedPieceInfo: ClipPiece? {
+        guard let sp = selectedPiece else { return nil }
+        return pieces.first { abs($0.start - sp) < 1e-6 }
+    }
+
+    /// Sets how fast the selected piece plays.
+    func setSelectedPieceSpeed(_ rate: Double) {
+        guard let p = selectedPieceInfo, !p.isCut else { return }
+        let keep = currentTime
+        settings.speeds.removeAll { $0.start <= p.mid && p.mid <= $0.end }
+        if abs(rate - 1) > 1e-6 { settings.speeds.append(SpeedRange(start: p.start, end: p.end, rate: rate)) }
+        seek(to: keep)
+    }
+
+    /// ] and [ step through the speeds.
+    func stepSelectedPieceSpeed(_ dir: Int) {
+        guard let p = selectedPieceInfo else { return }
+        let steps = Self.speedSteps
+        let i = steps.firstIndex { abs($0 - p.speed) < 1e-6 } ?? 0
+        let j = min(max(i + dir, 0), steps.count - 1)
+        if j == i { NSSound.beep(); return }
+        setSelectedPieceSpeed(steps[j])
+    }
+
     /// Drags the split at `old` to `new`, keeping any cut that ends or starts there attached.
     func moveSplit(from old: Double, to new: Double) -> Double {
         let edges = [settings.trimStart] + settings.splits.filter { abs($0 - old) > 1e-6 }.sorted() + [trimEnd]
@@ -243,6 +270,10 @@ final class EditorModel: ObservableObject {
         for j in settings.cuts.indices {
             if abs(settings.cuts[j].start - old) < 1e-6 { settings.cuts[j].start = v }
             if abs(settings.cuts[j].end - old) < 1e-6 { settings.cuts[j].end = v }
+        }
+        for j in settings.speeds.indices {
+            if abs(settings.speeds[j].start - old) < 1e-6 { settings.speeds[j].start = v }
+            if abs(settings.speeds[j].end - old) < 1e-6 { settings.speeds[j].end = v }
         }
         if let sp = selectedPiece, abs(sp - old) < 1e-6 { selectedPiece = v }
         return v
