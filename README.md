@@ -10,6 +10,8 @@ In the editor you can split the clip (S or ⌘B), cut pieces out (Delete), speed
 
 Download `Reel-<version>.zip` from the Releases page, unzip it and drag Reel into Applications. It runs on Apple silicon and Intel Macs with macOS 14 or later.
 
+Reel isn't signed with a Developer ID, so the first time you open it macOS says it can't check it for malicious software. Click Done, open System Settings › Privacy & Security, scroll down to the message about Reel and click Open Anyway, then confirm. You only do this once.
+
 If macOS says it can't check Reel for malicious software, right-click Reel in Applications, choose Open, then Open again. That happens with builds that aren't notarised.
 
 Reel lives in the menu bar. It asks for Screen Recording permission on first launch, and for the camera and microphone when you first pick them. Recording keyboard shortcuts is off by default; turning it on asks for Accessibility permission. Only keys pressed with ⌘, ⌃ or ⌥, plus Esc, Return, Tab and the arrows, are saved. Plain typing is never stored.
@@ -31,7 +33,7 @@ Development shortcut: `open build/Reel.app --args --open /path/to/Some.reel` ope
 ./scripts/release.sh         # universal build, zipped into build/Reel-<version>.zip
 ```
 
-Set `REEL_RELEASE_IDENTITY` (a Developer ID Application certificate) and `REEL_NOTARY_PROFILE` (a `notarytool` keychain profile) in `scripts/sign.local` to sign and notarise. Without them the zip is signed ad hoc. The script replaces `build/Reel.app`, so run `./scripts/bundle.sh` afterwards for your own copy.
+Set `REEL_RELEASE_IDENTITY` (a Developer ID Application certificate) and `REEL_NOTARY_PROFILE` (a `notarytool` keychain profile) in `scripts/sign.local` to sign and notarise. Without them the zip is left unsigned (ad hoc), never with your `sign.local` development certificate, and its debug symbols are stripped so it carries no folder paths from your Mac. The script replaces `build/Reel.app`, so run `./scripts/bundle.sh` afterwards for your own copy.
 
 ## Tests
 

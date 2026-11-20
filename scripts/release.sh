@@ -15,7 +15,7 @@ VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resourc
 APP=build/Reel.app
 ZIP="build/Reel-$VERSION.zip"
 
-REEL_UNIVERSAL=1 REEL_SIGN_IDENTITY=- ./scripts/bundle.sh release
+REEL_UNSIGNED=1 REEL_UNIVERSAL=1 REEL_SIGN_IDENTITY=- ./scripts/bundle.sh release
 
 if [ -n "${REEL_RELEASE_IDENTITY:-}" ]; then
   echo "Signing with $REEL_RELEASE_IDENTITY"
